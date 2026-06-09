@@ -268,11 +268,14 @@ async function establishSessionUser(user) {
     if (rawRole === "lab_technician") rawRole = "lab_guy";
     activeUserRole = rawRole;
     if (!ROLE_VIEW_PERMISSIONS[activeUserRole]) {
-      activeUserRole = "field_worker"; // Safety fallback
+      activeUserRole = "field_worker"; 
     }
 
     const userFullName = data ? data.full_name : user.email;
     
+    // Attach profile variables to user session securely
+    activeUser.full_name = userFullName;
+
     // Assign structural wrapper class
     const wrapper = document.getElementById("app-wrapper");
     let cssRole = activeUserRole;
@@ -515,7 +518,7 @@ async function syncAllDataFromSupabase() {
       specimens: dbRow.specimens || []
     }));
 
-    // 2. Sync Orders
+    // 2. Sync Orders (including clientUserId relationship)
     const { data: ordersData, error: ordersError } = await supabaseClient
       .from("concrete_orders")
       .select("*")
@@ -540,6 +543,7 @@ async function syncAllDataFromSupabase() {
       status: dbRow.status,
       assignedTo: dbRow.assigned_to,
       sampleId: dbRow.sample_id,
+      clientUserId: dbRow.client_user_id, 
       createdAt: dbRow.created_at
     }));
 
@@ -837,7 +841,6 @@ function initSignatureCanvas(id, canvasId, textId) {
   window.addEventListener("touchend", stop);
 }
 
-// --- Signature clean function ---
 function clearSignatureCanvas(id) {
   const canvas = canvases[id];
   const ctx = contexts[id];
@@ -2171,8 +2174,15 @@ function renderClientPortal() {
   
   if (!activeTbody || !resultsTbody) return;
   
-  const clientName = activeUser ? activeUser.full_name : "";
-  const clientOrders = orders.filter(o => o.clientName === clientName || o.notes.includes(clientName));
+  // Robustly filter client orders by their unique User ID when using Supabase
+  const clientOrders = orders.filter(o => {
+    if (supabaseClient && o.clientUserId) {
+      return o.clientUserId === activeUser.id;
+    }
+    // Fallback search parameters matching for offline/local mockup usage
+    const nameMatch = activeUser ? (activeUser.full_name || activeUser.email) : "";
+    return o.clientName === nameMatch || o.notes.includes(nameMatch);
+  });
   
   // Stats
   const pendingCount = clientOrders.filter(o => o.status === "pending" || o.status === "assigned").length;
