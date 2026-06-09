@@ -1,8 +1,6 @@
-
 // Concretus - Core Application Controller (Supabase Integrated)
 
 // === SUPABASE CONFIGURATION ===
-// Replace these placeholders with your actual Supabase URL and Anon Key
 const SUPABASE_URL = "https://vsgnqebypdyhakibruqj.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZzZ25xZWJ5cGR5aGFraWJydXFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk5MDU2OTAsImV4cCI6MjA5NTQ4MTY5MH0.xno6BzFL917b7vjatJiw43aFmE-lKR0rNbgmZ7RyrtI";
 
@@ -108,7 +106,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const dateInput = document.getElementById("casting-date");
   if (dateInput) dateInput.valueAsDate = new Date();
 
-  // Load orders from localStorage
+  // Initial local load before sync
   loadOrders();
 
   if (supabaseClient) {
@@ -202,7 +200,6 @@ function loadFallbackData() {
   renderAnalyticsDashboard();
   updateHeaderStats();
   
-  // Render new views based on active role
   if (activeUserRole === "client") {
     renderClientPortal();
   } else if (activeUserRole === "manager" || activeUserRole === "dispatch_guy") {
@@ -374,7 +371,7 @@ async function handleAuthSubmit(e) {
         const newUser = {
           id: "local_" + Date.now(),
           email,
-          password, // stored as plain text for simple local testing
+          password, 
           full_name: fullname || "משתמש חדש",
           role: selectedRole
         };
@@ -471,14 +468,15 @@ async function syncAllDataFromSupabase() {
   triggerSyncPulseAnimation("טוען נתונים מהענן...");
   
   try {
-    const { data, error } = await supabaseClient
+    // 1. Sync Samples
+    const { data: samplesData, error: samplesError } = await supabaseClient
       .from("concrete_samples")
       .select("*")
       .order("created_at", { ascending: false });
       
-    if (error) throw error;
+    if (samplesError) throw samplesError;
     
-    cubes = data.map(dbRow => ({
+    cubes = samplesData.map(dbRow => ({
       id: dbRow.id,
       projectNo: dbRow.project_no,
       orderNo: dbRow.order_no,
@@ -517,11 +515,48 @@ async function syncAllDataFromSupabase() {
       specimens: dbRow.specimens || []
     }));
 
+    // 2. Sync Orders
+    const { data: ordersData, error: ordersError } = await supabaseClient
+      .from("concrete_orders")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (ordersError) throw ordersError;
+
+    orders = ordersData.map(dbRow => ({
+      id: dbRow.id,
+      projectNo: dbRow.project_no,
+      city: dbRow.city,
+      street: dbRow.street,
+      clientName: dbRow.client_name,
+      phone: dbRow.phone,
+      element: dbRow.element,
+      date: dbRow.date,
+      hour: dbRow.hour,
+      concretePlant: dbRow.concrete_plant,
+      concreteVolume: Number(dbRow.concrete_volume),
+      concreteType: dbRow.concrete_type,
+      notes: dbRow.notes,
+      status: dbRow.status,
+      assignedTo: dbRow.assigned_to,
+      sampleId: dbRow.sample_id,
+      createdAt: dbRow.created_at
+    }));
+
+    // Re-render matching UI
     renderDashboardCubes();
     renderLedgerTable();
     renderLabQueue();
     renderAnalyticsDashboard();
     updateHeaderStats();
+
+    if (activeUserRole === "client") {
+      renderClientPortal();
+    } else if (activeUserRole === "manager" || activeUserRole === "dispatch_guy") {
+      renderAssignmentTable();
+    } else if (activeUserRole === "field_worker") {
+      renderInspectorAssignedOrders();
+    }
 
   } catch (err) {
     console.error("Fetch syncing error:", err.message);
@@ -552,7 +587,7 @@ function switchActiveView(viewId) {
   const allowedViews = ROLE_VIEW_PERMISSIONS[activeUserRole] || ["dispatch-view"];
   
   if (!allowedViews.includes(viewId)) {
-    viewId = allowedViews[0]; // Fallback to first allowed view
+    viewId = allowedViews[0]; 
   }
 
   document.querySelectorAll(".view-panel").forEach(p => p.classList.remove("active-view"));
@@ -802,6 +837,7 @@ function initSignatureCanvas(id, canvasId, textId) {
   window.addEventListener("touchend", stop);
 }
 
+// --- Signature clean function ---
 function clearSignatureCanvas(id) {
   const canvas = canvases[id];
   const ctx = contexts[id];
@@ -995,7 +1031,7 @@ async function handleCastSubmission(e) {
 
   const area = activeDimension === 150 ? 22500 : 10000;
 
-  // Collect dynamic list of sub-specimens securely
+  // Collect specimens list
   const specimenCards = document.querySelectorAll(".specimen-dynamic-card");
   const specimensArray = [];
   
@@ -1057,7 +1093,8 @@ async function handleCastSubmission(e) {
   if (supabaseClient) {
     triggerSyncPulseAnimation("שומר נטילה בענן...");
     try {
-      const { error } = await supabaseClient.from("concrete_samples").insert({
+      // 1. Insert Sample Row
+      const { error: sampleError } = await supabaseClient.from("concrete_samples").insert({
         id: newCube.id,
         project_no: newCube.projectNo,
         order_no: newCube.orderNo,
@@ -1089,7 +1126,15 @@ async function handleCastSubmission(e) {
         specimens: newCube.specimens,
         created_by: activeUser.id
       });
-      if (error) throw error;
+      if (sampleError) throw sampleError;
+
+      // 2. Update linked Order Status in Supabase
+      if (orderNo) {
+        await supabaseClient
+          .from("concrete_orders")
+          .update({ status: "sampling", sample_id: newCube.id })
+          .eq("id", orderNo);
+      }
       
       await syncAllDataFromSupabase();
     } catch (err) {
@@ -1097,17 +1142,17 @@ async function handleCastSubmission(e) {
       return;
     }
   } else {
+    // Local memory fallback
     cubes.unshift(newCube);
     saveState();
+    
+    const matchedOrder = orders.find(o => o.id === orderNo);
+    if (matchedOrder) {
+      matchedOrder.status = "sampling";
+      matchedOrder.sampleId = stickerNo;
+      saveOrders(orders);
+    }
     triggerSyncPulseAnimation("מסנכרן נטילה מול ענן...");
-  }
-
-  // Update linked order status
-  const matchedOrder = orders.find(o => o.id === orderNo);
-  if (matchedOrder) {
-    matchedOrder.status = "sampling";
-    matchedOrder.sampleId = stickerNo;
-    saveOrders(orders);
   }
 
   setTimeout(() => {
@@ -1265,12 +1310,22 @@ async function dispatchActiveCube() {
   if (supabaseClient) {
     triggerSyncPulseAnimation("מעדכן סטטוס שילוח...");
     try {
-      const { error } = await supabaseClient
+      // Update concrete_samples
+      const { error: sampleError } = await supabaseClient
         .from("concrete_samples")
         .update({ status: "transit" })
         .eq("id", activeWaybillCube.id);
       
-      if (error) throw error;
+      if (sampleError) throw sampleError;
+
+      // Update linked order status
+      const linkedOrder = orders.find(o => o.id === activeWaybillCube.orderNo || o.sampleId === activeWaybillCube.id);
+      if (linkedOrder) {
+        await supabaseClient
+          .from("concrete_orders")
+          .update({ status: "transit" })
+          .eq("id", linkedOrder.id);
+      }
       
       await syncAllDataFromSupabase();
     } catch (err) {
@@ -1278,15 +1333,14 @@ async function dispatchActiveCube() {
       return;
     }
   } else {
+    // Local fallback
     saveState();
+    const linkedOrder = orders.find(o => o.id === activeWaybillCube.orderNo || o.sampleId === activeWaybillCube.id);
+    if (linkedOrder) {
+      linkedOrder.status = "transit";
+      saveOrders(orders);
+    }
     triggerSyncPulseAnimation("מעדכן סטטוס שילוח...");
-  }
-
-  // Update linked order status to transit
-  const linkedOrder = orders.find(o => o.id === activeWaybillCube.orderNo || o.sampleId === activeWaybillCube.id);
-  if (linkedOrder) {
-    linkedOrder.status = "transit";
-    saveOrders(orders);
   }
 
   setTimeout(() => {
@@ -1429,7 +1483,7 @@ function loadCubeToTestingChamber(id) {
 
     document.getElementById("simulator-status-panel").innerHTML = `
       <p style="font-size: 12px; color: var(--success); text-align: center; margin: 0;">
-        <i class="fa-solid fa-circle-check"></i> שלב ב' (גיל 28 יום): הזן את עומס השבר הסופי לאישור התאמה לתקן והפקת תעודה.
+        <i class="fa-solid fa-circle-check"></i> שלב ב' (גיל 28 יום): הזן את עומס השבר סופי לאישור התאמה לתקן והפקת תעודה.
       </p>
     `;
   }
@@ -1489,7 +1543,8 @@ async function saveManualCrushResults() {
     if (supabaseClient) {
       triggerSyncPulseAnimation("שומר תוצאות 7 ימים...");
       try {
-        const { error } = await supabaseClient
+        // Update Sample table
+        const { error: sampleError } = await supabaseClient
           .from("concrete_samples")
           .update({
             status: "tested_7d",
@@ -1498,7 +1553,17 @@ async function saveManualCrushResults() {
           })
           .eq("id", activeTestingCube.id);
         
-        if (error) throw error;
+        if (sampleError) throw sampleError;
+
+        // Update linked Order status
+        const linkedOrder = orders.find(o => o.id === activeTestingCube.orderNo || o.sampleId === activeTestingCube.id);
+        if (linkedOrder) {
+          await supabaseClient
+            .from("concrete_orders")
+            .update({ status: "tested_7d" })
+            .eq("id", linkedOrder.id);
+        }
+
         await syncAllDataFromSupabase();
       } catch (err) {
         alert("שגיאה בשמירה: " + err.message);
@@ -1510,14 +1575,13 @@ async function saveManualCrushResults() {
         cubes[idx] = { ...activeTestingCube };
       }
       saveState();
-      triggerSyncPulseAnimation("שומר תוצאות 7 ימים...");
-    }
 
-    // Update linked order status to tested_7d
-    const linkedOrder = orders.find(o => o.id === activeTestingCube.orderNo || o.sampleId === activeTestingCube.id);
-    if (linkedOrder) {
-      linkedOrder.status = "tested_7d";
-      saveOrders(orders);
+      const linkedOrder = orders.find(o => o.id === activeTestingCube.orderNo || o.sampleId === activeTestingCube.id);
+      if (linkedOrder) {
+        linkedOrder.status = "tested_7d";
+        saveOrders(orders);
+      }
+      triggerSyncPulseAnimation("שומר תוצאות 7 ימים...");
     }
 
     setTimeout(() => {
@@ -1553,7 +1617,8 @@ async function saveManualCrushResults() {
     if (supabaseClient) {
       triggerSyncPulseAnimation("מפיק תעודת בדיקה...");
       try {
-        const { error } = await supabaseClient
+        // Update Sample table
+        const { error: sampleError } = await supabaseClient
           .from("concrete_samples")
           .update({
             status: "completed",
@@ -1565,7 +1630,17 @@ async function saveManualCrushResults() {
           })
           .eq("id", activeTestingCube.id);
         
-        if (error) throw error;
+        if (sampleError) throw sampleError;
+
+        // Update linked Order status
+        const linkedOrder = orders.find(o => o.id === activeTestingCube.orderNo || o.sampleId === activeTestingCube.id);
+        if (linkedOrder) {
+          await supabaseClient
+            .from("concrete_orders")
+            .update({ status: "completed", sample_id: activeTestingCube.id })
+            .eq("id", linkedOrder.id);
+        }
+
         await syncAllDataFromSupabase();
       } catch (err) {
         alert("שגיאה בהפקת תעודה: " + err.message);
@@ -1577,6 +1652,13 @@ async function saveManualCrushResults() {
         cubes[idx] = { ...activeTestingCube };
       }
       saveState();
+
+      const linkedOrder = orders.find(o => o.id === activeTestingCube.orderNo || o.sampleId === activeTestingCube.id);
+      if (linkedOrder) {
+        linkedOrder.status = "completed";
+        linkedOrder.sampleId = activeTestingCube.id;
+        saveOrders(orders);
+      }
       triggerSyncPulseAnimation("מפיק תעודת בדיקה...");
       renderAnalyticsDashboard(); 
     }
@@ -1589,14 +1671,6 @@ async function saveManualCrushResults() {
         <button class="btn btn-primary" style="width: auto; padding: 6px 14px; font-size: 11px; background-color: var(--success);" onclick="switchActiveView('reports-view')">לחץ כאן למעבר למאגר התעודות</button>
       </div>
     `;
-
-    // Update linked order status to completed
-    const linkedOrder = orders.find(o => o.id === activeTestingCube.orderNo || o.sampleId === activeTestingCube.id);
-    if (linkedOrder) {
-      linkedOrder.status = "completed";
-      linkedOrder.sampleId = activeTestingCube.id;
-      saveOrders(orders);
-    }
 
     setTimeout(() => {
       renderLabQueue();
@@ -1929,7 +2003,7 @@ function loadOrders() {
   if (stored) {
     orders = JSON.parse(stored);
   } else {
-    // Seed daily orders
+    // Seed default daily orders in case database is offline
     orders = [
       {
         id: "ORD-1001",
@@ -2005,7 +2079,8 @@ function closeOrderModal() {
   if (modal) modal.classList.remove("active-modal");
 }
 
-function handlePlaceOrder(e) {
+// --- Save Client Order (Supabase Sync Integrated) ---
+async function handlePlaceOrder(e) {
   e.preventDefault();
   
   const id = document.getElementById("order-num-input").value;
@@ -2042,13 +2117,48 @@ function handlePlaceOrder(e) {
     createdAt: new Date().toISOString()
   };
   
-  orders.unshift(newOrder);
-  saveOrders(orders);
+  if (supabaseClient) {
+    triggerSyncPulseAnimation("שומר הזמנה בענן...");
+    try {
+      const { error: insertError } = await supabaseClient
+        .from("concrete_orders")
+        .insert({
+          id: newOrder.id,
+          project_no: newOrder.projectNo,
+          city: newOrder.city,
+          street: newOrder.street,
+          client_name: newOrder.clientName,
+          phone: newOrder.phone,
+          element: newOrder.element,
+          date: newOrder.date,
+          hour: newOrder.hour,
+          concrete_plant: newOrder.concretePlant,
+          concrete_volume: newOrder.concreteVolume,
+          concrete_type: newOrder.concreteType,
+          notes: newOrder.notes,
+          status: newOrder.status,
+          assigned_to: newOrder.assignedTo,
+          sample_id: newOrder.sampleId,
+          client_user_id: activeUser.id
+        });
+        
+      if (insertError) throw insertError;
+      
+      await syncAllDataFromSupabase();
+    } catch (err) {
+      alert("שגיאה בשמירת הזמנה בענן: " + err.message);
+      return;
+    }
+  } else {
+    // Local memory fallback
+    orders.unshift(newOrder);
+    saveOrders(orders);
+    renderClientPortal();
+  }
   
   alert(`✓ הזמנה ${id} התקבלה בהצלחה! היא ממתינה להקצאת בודק.`);
   closeOrderModal();
   document.getElementById("client-order-form").reset();
-  renderClientPortal();
 }
 
 function renderClientPortal() {
@@ -2218,20 +2328,42 @@ function renderAssignmentTable() {
   });
 }
 
-function handleAssignInspector(orderId, inspectorName) {
+// --- Assign Inspector to Order (Supabase Sync Integrated) ---
+async function handleAssignInspector(orderId, inspectorName) {
   const oIdx = orders.findIndex(o => o.id === orderId);
   if (oIdx === -1) return;
   
+  let statusVal = "assigned";
   if (!inspectorName) {
-    orders[oIdx].assignedTo = null;
-    orders[oIdx].status = "pending";
-  } else {
-    orders[oIdx].assignedTo = inspectorName;
-    orders[oIdx].status = "assigned";
+    inspectorName = null;
+    statusVal = "pending";
   }
   
-  saveOrders(orders);
-  renderAssignmentTable();
+  if (supabaseClient) {
+    triggerSyncPulseAnimation("מעדכן הקצאה בענן...");
+    try {
+      const { error: updateError } = await supabaseClient
+        .from("concrete_orders")
+        .update({ 
+          assigned_to: inspectorName,
+          status: statusVal
+        })
+        .eq("id", orderId);
+      
+      if (updateError) throw updateError;
+      
+      await syncAllDataFromSupabase();
+    } catch (err) {
+      alert("שגיאה בעדכון ההקצאה בענן: " + err.message);
+      return;
+    }
+  } else {
+    // Local memory fallback
+    orders[oIdx].assignedTo = inspectorName;
+    orders[oIdx].status = statusVal;
+    saveOrders(orders);
+    renderAssignmentTable();
+  }
   
   if (inspectorName) {
     alert(`✓ הזמנה #${orderId} הוקצתה לבודק "${inspectorName}" בהצלחה!`);
@@ -2265,30 +2397,65 @@ function closeEditOrderModal() {
   if (modal) modal.classList.remove("active-modal");
 }
 
-function handleSaveEditedOrder(e) {
+// --- Save Edited Order details (Supabase Sync Integrated) ---
+async function handleSaveEditedOrder(e) {
   e.preventDefault();
   
   const id = document.getElementById("edit-order-id").value;
   const oIdx = orders.findIndex(o => o.id === id);
   if (oIdx === -1) return;
   
-  orders[oIdx].projectNo = document.getElementById("edit-order-project-no").value.trim();
-  orders[oIdx].city = document.getElementById("edit-order-city").value.trim();
-  orders[oIdx].street = document.getElementById("edit-order-street").value.trim();
-  orders[oIdx].clientName = document.getElementById("edit-order-client-name").value.trim();
-  orders[oIdx].phone = document.getElementById("edit-order-phone").value.trim();
-  orders[oIdx].element = document.getElementById("edit-order-element").value;
-  orders[oIdx].date = document.getElementById("edit-order-date").value;
-  orders[oIdx].hour = document.getElementById("edit-order-hour").value;
-  orders[oIdx].concretePlant = document.getElementById("edit-order-supplier").value.trim();
-  orders[oIdx].concreteVolume = parseFloat(document.getElementById("edit-order-volume").value || "8");
-  orders[oIdx].concreteType = document.getElementById("edit-order-concrete-type").value;
-  orders[oIdx].notes = document.getElementById("edit-order-notes").value.trim();
+  const updatedFields = {
+    projectNo: document.getElementById("edit-order-project-no").value.trim(),
+    city: document.getElementById("edit-order-city").value.trim(),
+    street: document.getElementById("edit-order-street").value.trim(),
+    clientName: document.getElementById("edit-order-client-name").value.trim(),
+    phone: document.getElementById("edit-order-phone").value.trim(),
+    element: document.getElementById("edit-order-element").value,
+    date: document.getElementById("edit-order-date").value,
+    hour: document.getElementById("edit-order-hour").value,
+    concretePlant: document.getElementById("edit-order-supplier").value.trim(),
+    concreteVolume: parseFloat(document.getElementById("edit-order-volume").value || "8"),
+    concreteType: document.getElementById("edit-order-concrete-type").value,
+    notes: document.getElementById("edit-order-notes").value.trim(),
+  };
+
+  if (supabaseClient) {
+    triggerSyncPulseAnimation("עדכון פרטי הזמנה בענן...");
+    try {
+      const { error: editError } = await supabaseClient
+        .from("concrete_orders")
+        .update({
+          project_no: updatedFields.projectNo,
+          city: updatedFields.city,
+          street: updatedFields.street,
+          client_name: updatedFields.clientName,
+          phone: updatedFields.phone,
+          element: updatedFields.element,
+          date: updatedFields.date,
+          hour: updatedFields.hour,
+          concrete_plant: updatedFields.concretePlant,
+          concrete_volume: updatedFields.concreteVolume,
+          concrete_type: updatedFields.concreteType,
+          notes: updatedFields.notes
+        })
+        .eq("id", id);
+        
+      if (editError) throw editError;
+      
+      await syncAllDataFromSupabase();
+    } catch (err) {
+      alert("שגיאה בעדכון ההזמנה בענן: " + err.message);
+      return;
+    }
+  } else {
+    // Local memory fallback
+    orders[oIdx] = { ...orders[oIdx], ...updatedFields };
+    saveOrders(orders);
+    renderAssignmentTable();
+  }
   
-  saveOrders(orders);
   closeEditOrderModal();
-  renderAssignmentTable();
-  
   alert(`✓ פרטי הזמנה #${id} עודכנו בהצלחה!`);
 }
 
@@ -2341,7 +2508,7 @@ function startOrderSampling(orderId) {
 
   // Pre-fill the casting form fields
   document.getElementById("project-no").value = order.projectNo;
-  document.getElementById("order-no").value = order.id; // use the order ID
+  document.getElementById("order-no").value = order.id; 
   document.getElementById("client-name").value = order.clientName;
   document.getElementById("site-address").value = `${order.city}, ${order.street}`;
   document.getElementById("building-desc").value = order.element;
@@ -2369,7 +2536,6 @@ function startOrderSampling(orderId) {
   // Pre-fill remarks with notes
   document.getElementById("remarks").value = order.notes ? `הערות מהזמנה: ${order.notes}` : "";
 
-  // Show alert
   alert(`✓ פרטי הזמנה #${order.id} נטענו בהצלחה! אנא הקלד מספר מדבקה כדי לאמת ולהתחיל את טופס הנטילה.`);
   
   // Highlight sticker verification input
