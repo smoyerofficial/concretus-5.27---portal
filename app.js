@@ -4,6 +4,7 @@
 const SUPABASE_URL = "https://vsgnqebypdyhakibruqj.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZzZ25xZWJ5cGR5aGFraWJydXFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk5MDU2OTAsImV4cCI6MjA5NTQ4MTY5MH0.xno6BzFL917b7vjatJiw43aFmE-lKR0rNbgmZ7RyrtI";
 
+
 let supabaseClient = null;
 
 // Prevent naming collisions with window.supabase library
@@ -82,6 +83,7 @@ const CONCRETE_CLASS_LIMITS = {
 // --- Application Core State ---
 let cubes = [];
 let orders = [];
+let dbInspectors = []; 
 let activeUser = null;
 let activeUserRole = "field_worker"; 
 let isRegisterMode = false;
@@ -546,6 +548,16 @@ async function syncAllDataFromSupabase() {
       clientUserId: dbRow.client_user_id, 
       createdAt: dbRow.created_at
     }));
+
+    // 3. Sync Inspectors (Database field workers)
+    const { data: profilesData, error: profilesError } = await supabaseClient
+      .from("profiles")
+      .select("full_name")
+      .eq("role", "field_worker");
+
+    if (!profilesError && profilesData) {
+      dbInspectors = profilesData.map(p => p.full_name);
+    }
 
     // Re-render matching UI
     renderDashboardCubes();
@@ -2281,14 +2293,20 @@ function renderAssignmentTable() {
     filtered = orders.filter(o => o.status === "completed");
   }
   
-  // Inspectors list
-  let inspectorsList = ["משה לוי", "דוד כהן", "אביב ישראלי", "יוסי מזרחי"];
-  const localUsers = JSON.parse(localStorage.getItem("concretus_local_users") || "[]");
-  localUsers.forEach(u => {
-    if (u.role === "field_worker" && !inspectorsList.includes(u.full_name)) {
-      inspectorsList.push(u.full_name);
-    }
-  });
+  // Populate inspector names dynamically from registered Supabase field workers
+  let inspectorsList = [];
+  if (supabaseClient && dbInspectors.length > 0) {
+    inspectorsList = [...dbInspectors];
+  } else {
+    // Fallback names for offline / local mockup usage
+    inspectorsList = ["משה לוי", "דוד כהן", "אביב ישראלי", "יוסי מזרחי"];
+    const localUsers = JSON.parse(localStorage.getItem("concretus_local_users") || "[]");
+    localUsers.forEach(u => {
+      if (u.role === "field_worker" && !inspectorsList.includes(u.full_name)) {
+        inspectorsList.push(u.full_name);
+      }
+    });
+  }
   
   tbody.innerHTML = "";
   if (filtered.length === 0) {
